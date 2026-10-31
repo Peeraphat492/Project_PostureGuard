@@ -72,7 +72,7 @@ python main.py
 ## 6. Windows และการใช้กล้อง 2 ตัว
 - โปรเจกต์นี้**พัฒนาบน macOS** และ**ทดสอบบน Windows 11 (Python 3.11.9) แล้ว**
   - ติดตั้ง `requirements.txt` ได้ รัน `python self_test.py` ผ่านครบ และเปิดแอปด้วย `python main.py` ได้
-  - ตรวจท่านั่งจากกล้อง 2 ตัวพร้อมกันได้: Front = เว็บแคมของเครื่อง (Camera 0), Side = iPad หรือ iPhone ผ่าน DroidCam (Camera 1)
+  - ตรวจท่านั่งจากกล้อง 2 ตัวพร้อมกันได้: Front = เว็บแคมของเครื่อง (Camera 0), Side = iPad, iPhone หรือ Android ผ่าน DroidCam (Camera 1)
   - บน Windows ต้องเปิดแอปด้วย `python main.py` เสมอ (ไม่ใช่ `python gui_modern.py`) เพราะ `main.py` โหลด MediaPipe
     ก่อน PyQt6 ถ้าโหลดสลับลำดับ MediaPipe จะขึ้น `DLL load failed while importing _framework_bindings`
 - จากการตรวจซอร์สโค้ด ไม่พบส่วนที่ทำงานได้เฉพาะ macOS:
@@ -94,9 +94,9 @@ python main.py
   - ถ้าภาพตะแคง 90° ให้หมุนภาพใน DroidCam Client หรือวางอุปกรณ์ในแนวที่ภาพตั้งตรง เพราะ MediaPipe จับท่าทางจากภาพที่ตะแคงไม่ได้
   - ถ้า DroidCam ยังไม่เชื่อมต่อกับอุปกรณ์ Windows จะยังเห็นกล้องนั้นและแอปแสดง "Both cameras live"
     แต่ภาพเป็นหน้าจอ "Start DroidCam" และกล้องข้างจะขึ้น "no person detected" ให้เชื่อมต่อก่อนเปิดกล้องในแอป
-- **ทดสอบบางส่วน:** Android (Samsung ผ่าน DroidCam) เชื่อมต่อเป็นกล้อง Side ได้ แต่ในการทดสอบภาพที่ได้ถูกวางเอียง/หมุน
-  แอปจึงแจ้ง "Side camera looks rotated — mount it upright" และทำงานแบบ Partial Monitoring (ใช้เฉพาะกล้องหน้า)
-  ยังไม่ได้ทดสอบการตรวจท่านั่งด้านข้างด้วย Android ให้ครบ
+- **ทดสอบแล้ว:** Android (Samsung ผ่าน DroidCam) ใช้เป็นกล้อง Side ได้เช่นกัน
+  - ถ้าวางเครื่องเอียงหรือภาพหมุน แอปจะแจ้ง "Side camera looks rotated — mount it upright" และทำงานแบบ
+    Partial Monitoring (ใช้เฉพาะกล้องหน้า) เมื่อตั้งเครื่องให้ตั้งตรงแล้ว จะกลับมาตรวจท่านั่งจากกล้องทั้งสองตัวตามปกติ
 
 ## 8. ประโยชน์ของโปรเจกต์
 - ช่วยให้ผู้ใช้คอมพิวเตอร์รู้ตัวเมื่อนั่งผิดท่า ก่อนจะกลายเป็นความเคยชิน
@@ -105,7 +105,7 @@ python main.py
 - ใช้อุปกรณ์ทั่วไป (เว็บแคม) และประมวลผลในเครื่อง ไม่ส่งภาพออกไปภายนอก
 
 ## 9. ข้อจำกัดที่ทราบ
-- บน Windows ทดสอบกับ iPad และ iPhone (DroidCam) ทดสอบ Android ได้เพียงบางส่วน (ดูข้อ 7) และยังไม่ได้ทดสอบ
+- บน Windows ทดสอบกับ iPad, iPhone และ Android (DroidCam) ยังไม่ได้ทดสอบ
   Active Break กับหน้า History ด้วยกล้องจริงบน Windows
 - การทดสอบส่วนใหญ่เป็นการทดสอบอัตโนมัติด้วยข้อมูลจำลองบน macOS การทดสอบกับผู้ใช้จริงยังจำกัด
 - วิเคราะห์จากภาพ 2 มิติ (ไม่ใช่ 3D) ความแม่นยำขึ้นกับตำแหน่งกล้อง แสง และการมองเห็นร่างกาย

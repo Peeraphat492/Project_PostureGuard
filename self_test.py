@@ -343,7 +343,9 @@ def test_history_store():
     import sqlite3
     import time as _time
     from datetime import datetime
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors: on Windows the simulated-crash store below leaves a writer thread behind and the
+    # SQLite file can still be locked when the temp dir is removed.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         db = Path(tmp) / "data" / "history.sqlite3"
         store = HistoryStore(db)
         assert store.available and store.sessions() == [] and db.exists(), "created on first use"

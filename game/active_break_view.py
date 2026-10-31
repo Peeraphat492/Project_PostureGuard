@@ -1,7 +1,10 @@
 """Qt screens for the Active Break game: play screen (HUD + camera canvas + instructions) and results."""
 from __future__ import annotations
 
+import logging
 import math
+import os
+from collections import Counter
 from typing import Optional
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
@@ -24,6 +27,12 @@ from .coin_game import BOMB_DANGER_FROM, BOMB_RADIUS, COIN_RADIUS, HAND_RADIUS, 
 from config import CONFIG
 from .stretch_game import StretchGame
 from ui_kit import BLUE, COIN, CYAN, GOOD, POOR, PREVIEW_BG, TEXT, VIOLET, format_seconds, make_label, set_tone
+
+# Diagnostic for real-camera checks (off by default): POSTURE_GUARD_DEBUG_HANDS=1 marks each wrist and the source of
+# each hand marker (K = index/pinky knuckles, F = estimated along the forearm) and logs how often each source is used.
+DEBUG_HANDS = os.environ.get("POSTURE_GUARD_DEBUG_HANDS") == "1"
+HAND_LOG_SECONDS = 5.0
+log = logging.getLogger("posture_guard")
 
 GAME_QSS = """
 QWidget#breakView, QWidget#breakPage { background: #FFFFFF; }
@@ -156,6 +165,8 @@ class GameCanvas(QWidget):
         self._ctrl: Optional[ActiveBreak] = None
         self._pose: Optional[BodyPose] = None
         self._now = 0.0
+        self._hand_stats: Counter = Counter()          # DEBUG_HANDS only
+        self._hand_stats_since: Optional[float] = None
 
     def sizeHint(self) -> QSize:
         return QSize(800, 450)
@@ -164,7 +175,22 @@ class GameCanvas(QWidget):
         self._ctrl, self._now, self._pose = ctrl, now, pose
         if pixmap is not None:
             self._pixmap = pixmap
+        if DEBUG_HANDS and ctrl.playing and pixmap is not None:
+            self._log_hand_sources(now, pose)
         self.update()
+
+    def _log_hand_sources(self, now: float, pose: Optional[BodyPose]):
+        """Share of hand markers from knuckle landmarks / forearm estimates / missing, logged every few seconds."""
+        stats = self._hand_stats
+        stats.update(["no body"] if pose is None else list(pose.hand_sources) + ["missing"] * (2 - len(pose.hands)))
+        if self._hand_stats_since is None:
+            self._hand_stats_since = now
+        if now - self._hand_stats_since >= HAND_LOG_SECONDS:
+            total = sum(stats.values()) or 1
+            log.info("Hand debug (%.0f s): %s", now - self._hand_stats_since,
+                     ", ".join(f"{k} {100 * v / total:.0f}%" for k, v in stats.most_common()))
+            stats.clear()
+            self._hand_stats_since = now
 
     # ---- mapping helpers
     def _image_rect(self) -> QRectF:
@@ -246,11 +272,25 @@ class GameCanvas(QWidget):
 
     def _paint_hands(self, p: QPainter, ir: QRectF):
         r = HAND_RADIUS * ir.height() * 0.55
-        for wrist in self._pose.wrists:
-            c = self._map(ir, *wrist)
+        for hand in self._pose.hands:
+            c = self._map(ir, *hand)
             p.setPen(QPen(QColor("#FFFFFF"), 3))
             p.setBrush(QColor(CYAN))
             p.drawEllipse(c, r, r)
+        if DEBUG_HANDS:   # wrist dots, wrist -> hand lines and the source of each marker
+            for wrist in self._pose.wrists:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor("#94A3B8"))
+                p.drawEllipse(self._map(ir, *wrist), 6, 6)
+            p.setFont(_font(14, QFont.Weight.Black, self.font()))
+            for hand, source in zip(self._pose.hands, self._pose.hand_sources):
+                c = self._map(ir, *hand)
+                wrist = min(self._pose.wrists, key=lambda w: math.dist(w, hand), default=None)
+                if wrist is not None:
+                    p.setPen(QPen(QColor("#94A3B8"), 2))
+                    p.drawLine(self._map(ir, *wrist), c)
+                p.setPen(QColor("#0F172A"))
+                p.drawText(c + QPointF(r + 4, -r), "K" if source == "knuckles" else "F")
 
     def _paint_stretch(self, p: QPainter, ir: QRectF, game: StretchGame):
         now = self._now

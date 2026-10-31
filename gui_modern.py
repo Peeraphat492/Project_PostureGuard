@@ -53,7 +53,7 @@ from game.body_pose import BodyPose
 from pose_engine import PoseEngine, mirror_landmarks, side_overrides
 from history import HistoryStore
 from history_view import HistoryView
-from notifications import BAD_RISKS, PopupNotifier
+from notifications import BAD_RISKS, PopupNotifier, result_evidence
 from posture_analyzer import METRICS, FeatureSet, PostureAnalyzer
 from session import SessionTracker
 from ui_kit import (
@@ -1016,7 +1016,7 @@ class MainWindow(QMainWindow):
         PopupNotifier; this only opens, refreshes and closes the single popup."""
         now = self._clock()
         risk = result.risk_level if result is not None else "N/A"
-        action = self.notifier.update(now, risk, reliable=risk != "N/A")
+        action = self.notifier.update(now, *result_evidence(result))
         popup = self.posture_popup
         if action == "close":
             self._close_popup()

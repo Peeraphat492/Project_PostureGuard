@@ -62,10 +62,11 @@ class AppConfig:
     poor_posture_seconds: float = 20.0
 
     # Popup notifications (the only notification UI; see notifications.py for the episode rules)
-    popup_trigger_seconds: float = 15.0   # confirmed bad posture (reliable data only) before the warning popup
+    popup_trigger_seconds: float = 10.0   # confirmed bad posture (reliable data only) before the warning popup
     popup_visible_seconds: float = 15.0   # a popup closes itself after being visible this long
     popup_recovery_seconds: float = 3.0   # continuous GOOD posture that closes the popup and ends the episode
     popup_snooze_seconds: float = 60.0
+    popup_inactive_reset_seconds: float = 60.0  # no posture evidence this long (user away) ends the episode
 
     # ---------------------------------------------------------------------------------------------
     # Ergonomic reference limits (no personal calibration). See README "Posture metrics" for formulas.

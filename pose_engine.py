@@ -54,6 +54,11 @@ TRACKED = {
     "right_elbow": _PL.RIGHT_ELBOW,
     "left_wrist": _PL.LEFT_WRIST,
     "right_wrist": _PL.RIGHT_WRIST,
+    # Hand points (index / pinky knuckles) locate the hand itself for touching game targets.
+    "left_index": _PL.LEFT_INDEX,
+    "right_index": _PL.RIGHT_INDEX,
+    "left_pinky": _PL.LEFT_PINKY,
+    "right_pinky": _PL.RIGHT_PINKY,
 }
 
 

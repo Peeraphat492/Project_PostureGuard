@@ -16,12 +16,12 @@ import numpy as np
 from config import CONFIG
 from game.active_break import ActiveBreak
 from game.body_pose import BodyPose
-from game.coin_game import COIN_RADIUS, CoinGame
+from game.coin_game import BOMB_TRAVEL_SECONDS, COIN_RADIUS, CoinGame
 from game.stretch_game import EXERCISES, StretchGame
 from geometry import signed_lean_deg, signed_tilt_deg
 from pose_engine import LandmarkPoint, LandmarkStabilizer, OneEuroFilter, PoseEngine, mirror_landmarks, side_overrides
 from history import HistoryStore, filter_since, summarize
-from notifications import PopupNotifier
+from notifications import CAMERAS, PopupNotifier, result_evidence
 from posture_analyzer import PostureAnalyzer, indicator_score, score_band
 from session import SessionTracker
 
@@ -263,10 +263,10 @@ class Feed:
     def __init__(self, notifier, fps=20):
         self.n, self.t, self.dt, self.actions = notifier, 0.0, 1.0 / fps, []
 
-    def run(self, seconds, risk="WARNING", reliable=True):
+    def run(self, seconds, risk="WARNING", reliable=True, cameras=CAMERAS, problems=()):
         for _ in range(round(seconds / self.dt)):
             self.t += self.dt
-            action = self.n.update(self.t, risk, reliable)
+            action = self.n.update(self.t, risk, reliable, cameras, problems)
             if action:
                 self.actions.append((round(self.t, 2), action))
                 if action == "close":
@@ -308,17 +308,21 @@ def test_popup_notifier():
     assert not f.n.notified
 
     # Unreliable data pauses the count (neither adds bad time nor warns) and interrupts recovery.
-    f = Feed(PopupNotifier()).run(10).run(20, "N/A", reliable=False).run(4.9)
-    assert f.actions == [] and approx(f.n.bad_seconds, 14.9, 0.06)
+    f = Feed(PopupNotifier()).run(trigger - 5).run(20, "N/A", reliable=False).run(4.9)
+    assert f.actions == [] and approx(f.n.bad_seconds, trigger - 0.1, 0.06)
     f.run(0.2)
     assert f.actions[-1][1] == "show"
     f = Feed(PopupNotifier()).run(trigger + 1)
     f.run(2, "GOOD").run(1, "N/A", reliable=False).run(2, "GOOD")
     assert f.n.notified and f.n.visible == "posture", "recovery must be 3 *continuous* GOOD seconds"
-    # Frame stalls cannot fast-forward the timer.
+    # Frame stalls cannot fast-forward the timer: only camera_frame_timeout_seconds of a long gap is posture time,
+    # the rest is time without evidence (a gap of popup_inactive_reset_seconds or more ends the episode).
     n = PopupNotifier()
     n.update(0.0, "WARNING", True)
-    assert n.update(30.0, "WARNING", True) is None and n.bad_seconds <= CONFIG.session_max_tick_seconds
+    assert n.update(30.0, "WARNING", True) is None and n.bad_seconds <= CONFIG.camera_frame_timeout_seconds
+    assert approx(n.idle_seconds, 30.0 - CONFIG.camera_frame_timeout_seconds)
+    n.update(30.0 + CONFIG.popup_inactive_reset_seconds + 5, "WARNING", True)
+    assert n.bad_seconds == 0 and not n.notified, "a stall longer than the inactivity limit ends the episode"
 
     # Snooze: no posture popup for popup_snooze_seconds, even for a new episode; afterwards it may show.
     f = Feed(PopupNotifier()).run(trigger + 1)
@@ -333,10 +337,91 @@ def test_popup_notifier():
     # Only one popup at a time: the break reminder blocks the posture popup and vice versa.
     n = PopupNotifier()
     n.opened("break", 0.0)
-    f = Feed(n).run(trigger + 1)
+    f = Feed(n).run(max(trigger, visible) + 1)
     assert [a for _, a in f.actions] == ["close", "show"], "break popup auto-closes, posture popup only after it"
     assert f.actions[0][0] == round(visible, 2) and f.actions[1][0] > f.actions[0][0]
     assert f.n.visible == "posture" and not f.n.break_popup_allowed(), "no break reminder over a posture popup"
+
+    # Snooze expiry: the bad posture continues -> it warns again once, right after the snooze, never during it.
+    f = Feed(PopupNotifier()).run(trigger + 1)
+    f.n.snooze(f.t)
+    f.n.closed()
+    snooze_end = f.t + CONFIG.popup_snooze_seconds
+    f.run(snooze_end - f.t - 0.1)
+    assert [a for _, a in f.actions] == ["show"], "nothing during the snooze"
+    f.run(0.2)
+    assert [a for _, a in f.actions] == ["show", "show"] and snooze_end <= f.actions[-1][0] <= snooze_end + 0.1
+    f.run(60)
+    assert [a for _, a in f.actions].count("show") == 2, "no duplicates after the repeat warning"
+    # Pause / Resume (Stop and Open Cameras reset the episode): the full threshold applies again.
+    f = Feed(PopupNotifier()).run(10)
+    f.n.reset_episode()
+    f.run(trigger - 0.2)
+    assert f.actions == []
+    f.run(0.4)
+    assert [a for _, a in f.actions] == ["show"]
+
+    # Low frame rates: elapsed time is used, so the warning still comes after ~trigger seconds of bad posture.
+    for fps in (2, 1, 0.5):
+        f = Feed(PopupNotifier(), fps=fps).run(trigger + 6)
+        shows = [t for t, a in f.actions if a == "show"]
+        assert len(shows) == 1 and shows[0] - f.dt <= trigger + f.dt + 1e-6, (fps, shows)
+
+    # Analyzer -> notifier, the GUI's per-frame path (cameras dropping out, user leaving the desk).
+    def watch(script, seconds, fps=20):
+        an, n, t, shows, low = PostureAnalyzer(), PopupNotifier(), 0.0, [], []
+        for _ in range(round(seconds * fps)):
+            t += 1 / fps
+            front, side = script(t)
+            before = n.bad_seconds
+            action = n.update(t, *result_evidence(evaluate(an, front, side, t)))
+            if action == "show":
+                shows.append(round(t, 2))
+                n.closed()   # dismissed
+            if n.bad_seconds < before and not shows:
+                low.append(round(t, 2))   # the count went down before the warning: a reset
+        return shows, low
+
+    good = (front_pose(), side_pose())
+    fwd = (front_pose(), side_pose(forward_head_deg=32))          # measured by the side camera only
+    shoulder = (front_pose(tilt_deg=6.5), side_pose())             # measured by the front camera only
+    shows, low = watch(lambda t: fwd, 25)
+    base = shows[0]
+    assert len(shows) == 1 and trigger < base < trigger + 2.5 and not low, shows
+    for loss in (1, 2, 3, 5):
+        for bad, dropped in ((fwd, (fwd[0], None)), (shoulder, (None, shoulder[1])), (fwd, (None, None))):
+            shows, low = watch(lambda t: dropped if 6 <= t < 6 + loss else bad, 40)
+            assert len(shows) == 1 and not low, (loss, shows, low)
+            assert shows[0] <= base + loss + CONFIG.metric_enter_seconds + 0.2, (loss, shows)
+    # Partial Monitoring: one camera's bad posture warns; one camera's GOOD ends only an episode it can measure.
+    shows, low = watch(lambda t: (shoulder[0], None), 25)
+    assert len(shows) == 1 and not low
+    an, n = PostureAnalyzer(), PopupNotifier()
+    for i in range(1, 2001):
+        t = i / 20
+        scene = shoulder if t < 20 else (good[0], None)              # front problem, then side camera lost
+        n.update(t, *result_evidence(evaluate(an, *scene, t)))
+        if t == 20.0:
+            assert n.notified
+        if t == 25.0:
+            assert not n.notified, "front camera alone confirms recovery from a front-camera problem"
+    an, n = PostureAnalyzer(), PopupNotifier()
+    for i in range(1, 2401):
+        t = i / 20
+        scene = fwd if t < 20 else (good[0], None)                   # side problem, then side camera lost
+        n.update(t, *result_evidence(evaluate(an, *scene, t)))
+        if t == 60.0:
+            assert n.notified, "front camera GOOD is not a recovery from Forward Head"
+        if t == 100.0:
+            assert not n.notified, "but the episode ends after popup_inactive_reset_seconds without evidence"
+    # Leaving the desk: nobody -> no warning; back within the limit -> same episode; after it -> a fresh episode.
+    shows, _ = watch(lambda t: (None, None), 120)
+    assert shows == []
+    away = lambda leave, back: (lambda t: fwd if t < leave or t >= back else (None, None))
+    shows, _ = watch(away(20, 50), 90)
+    assert len(shows) == 1, "back after 30 s: the dismissed episode continues"
+    shows, _ = watch(away(20, 95), 130)
+    assert len(shows) == 2 and 95 + trigger < shows[1] < 95 + trigger + 2.5, shows
 
 
 def test_history_store():
@@ -446,14 +531,19 @@ def test_history_store():
 
 
 def game_pose(nose=(0.5, 0.35), wrists=((0.38, 0.85), (0.62, 0.85)), elbows=((0.33, 0.70), (0.67, 0.70)),
-              wrist_vis=0.95, elbow_vis=0.95, shoulders=((0.40, 0.55), (0.60, 0.55))):
-    """BodyPose in displayed (mirrored) game coordinates of a 4:3 frame."""
+              wrist_vis=0.95, elbow_vis=0.95, shoulders=((0.40, 0.55), (0.60, 0.55)), hands=None):
+    """BodyPose in displayed (mirrored) game coordinates of a 4:3 frame. hands: centres of the two hands (index and
+    pinky knuckles are placed either side of them); None = no hand points (estimated along the forearm)."""
     def p(x, y, v=0.95):
         return LandmarkPoint(x, y, 0.0, v, 1280, 960)
-    return BodyPose.from_landmarks({
+    lms = {
         "nose": p(*nose), "left_shoulder": p(*shoulders[0]), "right_shoulder": p(*shoulders[1]),
         "left_wrist": p(*wrists[0], wrist_vis), "right_wrist": p(*wrists[1], wrist_vis),
-        "left_elbow": p(*elbows[0], elbow_vis), "right_elbow": p(*elbows[1], elbow_vis)}, aspect=4 / 3)
+        "left_elbow": p(*elbows[0], elbow_vis), "right_elbow": p(*elbows[1], elbow_vis)}
+    for side, hand in zip(("left", "right"), hands or ()):
+        if hand is not None:
+            lms[f"{side}_index"], lms[f"{side}_pinky"] = p(hand[0] - 0.012, hand[1]), p(hand[0] + 0.012, hand[1])
+    return BodyPose.from_landmarks(lms, aspect=4 / 3)
 
 
 def play(game, pose, seconds, t, fps=20):
@@ -532,10 +622,112 @@ def test_active_break_games():
     far = game_pose(wrists=((0.02 if coin.x > 0.5 else 0.98, 0.95), (0.02 if coin.x > 0.5 else 0.98, 0.95)))
     t = play(cg, far, 0.5, t)
     assert cg.coins_collected == 0
-    on_coin = game_pose(wrists=((coin.x, coin.y), (coin.x + 0.5 * COIN_RADIUS / cg.aspect, coin.y)))
+    on_coin = game_pose(hands=((coin.x, coin.y), (coin.x + 0.5 * COIN_RADIUS / cg.aspect, coin.y)))
     cg.update(t + 0.05, on_coin)
     assert cg.coins_collected == 1 and cg.score == CONFIG.coin_points, "both hands on one coin: +5 once"
     assert cg.coin is not coin, "collected coin replaced"
+
+    # Coins are touched with the HAND (between the index and pinky knuckles), not the wrist behind it.
+    from game.body_pose import HAND_FROM_FOREARM
+    from game.coin_game import HAND_RADIUS, Coin
+
+    def touch(coin_xy, wrist, hand):
+        """One frame with the screen-left arm reaching (wrist and hand centre given); the other hand is far away."""
+        elbow = (2 * wrist[0] - hand[0], 2 * wrist[1] - hand[1])    # forearm continues behind the wrist
+        pose = game_pose(wrists=(wrist, (0.62, 0.85)), elbows=(elbow, (0.67, 0.70)), hands=(hand, (0.05, 0.95)))
+        g = CoinGame(rng=random.Random(0))
+        g.update(0.0, pose)
+        g.coin = Coin(*coin_xy, 0.0)
+        g.update(0.05, pose)
+        return g.coins_collected == 1
+
+    reach = COIN_RADIUS + HAND_RADIUS            # frame-height units; x distances are scaled by the aspect 4:3
+    palm = 0.10                                  # wrist -> hand centre (about a palm length at desk distance)
+    c = (0.70, 0.30)
+    for angle in (0, 90, 180, 270):              # hand on the coin from any direction; the wrist a palm behind
+        ux, uy = math.cos(math.radians(angle)) / (4 / 3), math.sin(math.radians(angle))
+        assert touch(c, (c[0] - palm * ux, c[1] - palm * uy), c), angle
+    # Wrist close to the coin but the hand pointing away: not a touch (this counted with the wrist).
+    for gap in (0.06, 0.10):
+        wrist = (c[0] - gap / (4 / 3), c[1])
+        hand = (wrist[0] - palm / (4 / 3), wrist[1])
+        assert not touch(c, wrist, hand), gap
+    # Reaching with the fingers: hand centre inside the hit distance, wrist well outside it (missed with the wrist).
+    hand = (c[0] - 0.9 * reach / (4 / 3), c[1])
+    assert touch(c, (hand[0] - palm / (4 / 3), hand[1]), hand)
+    # Either hand works on its own (displayed left and right).
+    for side in (0, 1):
+        hands = [(0.05, 0.95), (0.95, 0.95)]
+        hands[side] = c
+        g = CoinGame(rng=random.Random(0))
+        pose = game_pose(hands=tuple(hands))
+        g.update(0.0, pose)
+        g.coin = Coin(*c, 0.0)
+        g.update(0.05, pose)
+        assert g.coins_collected == 1, side
+    # No hand points: the hand is estimated along the forearm, never taken as the wrist itself.
+    wrist = (c[0] - palm / (4 / 3), c[1])
+    est = game_pose(wrists=(wrist, (0.62, 0.85)), elbows=((wrist[0] - 0.2, wrist[1]), (0.67, 0.70)))
+    assert approx(est.hands[0][0], wrist[0] + 0.2 * HAND_FROM_FOREARM) and approx(est.hands[0][1], wrist[1])
+    no_arm = game_pose(wrists=((c[0], c[1]), (0.62, 0.85)), elbow_vis=0.05)
+    assert no_arm.hands == () and no_arm.wrists, "a wrist without hand points or elbow is not a hand"
+    # Mirroring: the raw right hand appears on the displayed left, at the mirrored x.
+    raw = {n: LandmarkPoint(x, y, 0.0, 0.95, 1280, 960) for n, (x, y) in {
+        "nose": (0.5, 0.3), "left_shoulder": (0.6, 0.5), "right_shoulder": (0.4, 0.5),
+        "right_index": (0.20, 0.40), "right_pinky": (0.24, 0.42)}.items()}
+    shown = BodyPose.from_landmarks(mirror_landmarks(raw), aspect=4 / 3)
+    assert len(shown.hands) == 1 and approx(shown.hands[0][0], 1 - 0.22) and approx(shown.hands[0][1], 0.41)
+    assert shown.hand_sources == ("knuckles",) and est.hand_sources[0] == "forearm"
+
+    # Rendered marker position through the game's real pipeline (MainWindow._update_active_break -> GameCanvas):
+    # raw landmarks are mirrored, cropped to the canvas shape (cover), and each marker is drawn at _map(rect, hand).
+    # It must land on the displayed knuckle midpoint (or forearm estimate), clearly away from the wrist, and the
+    # coin touch must use that same point.
+    from PyQt6.QtCore import QRectF
+    from game.active_break_view import GameCanvas
+    from gui_modern import MainWindow
+
+    class Size:   # canvas stand-in for MainWindow._cover_box
+        def __init__(self, w, h):
+            self.w, self.h = w, h
+
+        def width(self):
+            return self.w
+
+        def height(self):
+            return self.h
+
+    fw, fh = 1280, 960
+    raw = {n: LandmarkPoint(x, y, 0.0, 0.95, fw, fh) for n, (x, y) in {
+        "nose": (0.5, 0.30), "left_shoulder": (0.62, 0.50), "right_shoulder": (0.38, 0.50),
+        "left_elbow": (0.68, 0.62), "left_wrist": (0.74, 0.45), "left_index": (0.78, 0.33), "left_pinky": (0.82, 0.37),
+        "right_elbow": (0.30, 0.70), "right_wrist": (0.22, 0.55)}.items()}     # right hand: no hand points
+    knuckle_mid = (0.80, 0.35)
+    forearm_hand = (0.22 + (0.22 - 0.30) * HAND_FROM_FOREARM, 0.55 + (0.55 - 0.70) * HAND_FROM_FOREARM)
+    for cw, ch in ((900, 500), (800, 800), (1200, 500)):
+        box = MainWindow._cover_box(fw, fh, Size(cw, ch))
+        pose = BodyPose.from_landmarks(MainWindow._crop_landmarks(mirror_landmarks(raw), box, fw, fh),
+                                       aspect=box[2] / box[3])
+        assert pose.hand_sources == ("knuckles", "forearm"), pose.hand_sources
+        s = max(cw / fw, ch / fh)   # independent mapping: mirrored full frame scaled to cover the canvas, centred
+
+        def on_screen(xy):
+            return ((1 - xy[0]) * fw * s - (fw * s - cw) / 2, xy[1] * fh * s - (fh * s - ch) / 2)
+
+        for hand, expected in zip(pose.hands, (knuckle_mid, forearm_hand)):
+            marker = GameCanvas._map(QRectF(0, 0, cw, ch), *hand)
+            ex, ey = on_screen(expected)
+            assert math.hypot(marker.x() - ex, marker.y() - ey) < 1.5, ((cw, ch), (marker.x(), marker.y()), (ex, ey))
+        wrist_px = on_screen((0.74, 0.45))
+        marker = GameCanvas._map(QRectF(0, 0, cw, ch), *pose.hands[0])
+        assert math.hypot(marker.x() - wrist_px[0], marker.y() - wrist_px[1]) > 40, "marker is not on the wrist"
+        if (cw, ch) == (900, 500):   # the coin touch uses exactly the drawn marker point
+            for coin_at, expect in ((pose.hands[0], 1), (pose.wrists[0], 0)):
+                g = CoinGame(rng=random.Random(0))
+                g.update(0.0, pose)
+                g.coin = Coin(*coin_at, 0.0)
+                g.update(0.05, pose)
+                assert g.coins_collected == expect, (coin_at, expect)
     # Bombs: dodging toward the correct side (displayed coordinates) scores, standing still is a hit.
     for side, dodge_nose, expect in (("left", (0.62, 0.35), "avoided"), ("right", (0.38, 0.35), "avoided"),
                                      ("top", (0.5, 0.48), "avoided"), ("left", (0.5, 0.35), "hit"),
@@ -570,6 +762,62 @@ def run_frames(an, front, side, start, seconds, persistent=0.0, fps=20):
         t = start + i / fps
         res = an.classify(an.extract_front(front, now=t), an.extract_side(side, now=t), persistent, now=t)
     return res
+
+
+def test_coin_bomb_collisions():
+    def moved(dx=0.0, dy=0.0, widen=1.0):
+        """The whole upper body moved by (dx, dy) in displayed coordinates (widen: leaning toward the camera)."""
+        half = 0.10 * widen
+        return game_pose(nose=(0.5 + dx, 0.35 + dy), shoulders=((0.5 + dx - half, 0.55 + dy), (0.5 + dx + half, 0.55 + dy)))
+
+    def outcome(side, script, fps=20):
+        """Play one bomb; script(progress) gives the pose (None = not tracked). Returns hit / dodged / none."""
+        cg = CoinGame(rng=random.Random(1))
+        t = play(cg, moved(), 1.0, 0.0)
+        cg._spawn_bomb(t, side)
+        start, score = t, cg.score
+        while cg.bomb is not None:
+            t += 1 / fps
+            cg.update(t, script((t - start) / BOMB_TRAVEL_SECONDS))
+        result = "hit" if cg.bomb_hits else ("dodged" if cg.bombs_avoided else "none")
+        assert cg.bomb_hits + cg.bombs_avoided <= 1, "one result per bomb"
+        if result == "dodged":
+            assert cg.score == score + CONFIG.bomb_avoid_points
+        if result == "none":
+            assert cg.score == score, "no points either way without tracking"
+        return result
+
+    def after(pose, at=0.3, before=None):
+        return lambda progress: pose if progress >= at else (before or moved())
+
+    still, duck, left, right = moved(), moved(dy=0.10), moved(dx=-0.14), moved(dx=0.14)
+    # Ducking clears every bomb: under a side bomb and below a falling one.
+    for side in ("top", "left", "right"):
+        assert outcome(side, after(duck)) == "dodged", ("duck", side)
+    # Left / right: out of the path counts; moving into a side bomb's path is a real collision.
+    assert outcome("top", after(left)) == "dodged" and outcome("top", after(right)) == "dodged"
+    assert outcome("right", after(left)) == "dodged" and outcome("left", after(right)) == "dodged"
+    assert outcome("left", after(left)) == "hit" and outcome("right", after(right)) == "hit"
+    # Real collisions: staying in the path, too small a move (thresholds are not lowered), returning too early,
+    # and crossing a side bomb's path mid-flight even when stepping back out before it lands.
+    for side in ("top", "left", "right"):
+        assert outcome(side, after(still)) == "hit", ("still", side)
+        assert outcome(side, after(moved(dx=0.03, dy=0.03))) == "hit", ("small move", side)
+        assert outcome(side, lambda pr: duck if 0.3 <= pr < 0.7 else still) == "hit", ("back too early", side)
+    assert outcome("left", lambda pr: left if 0.5 <= pr < 0.85 else (right if pr >= 0.85 else still)) == "hit"
+    # The hit-box is sized from the relaxed pose: leaning toward the camera while ducking does not enlarge it.
+    assert outcome("top", after(moved(dy=0.07, widen=1.4))) == "dodged"
+
+    # Tracking loss is never a hit by itself.
+    assert outcome("top", lambda pr: None if 0.6 <= pr < 0.7 else (duck if pr >= 0.3 else still)) == "dodged", \
+        "short drop-out while ducked"
+    assert outcome("top", lambda pr: None if pr >= 0.85 else (duck if pr >= 0.3 else still)) == "dodged", \
+        "lost just before impact: judged on the last tracked (ducked) head"
+    assert outcome("left", lambda pr: None if pr >= 0.85 else still) == "hit", \
+        "leaving the frame at the last moment does not escape a bomb that is in the path"
+    assert outcome("top", lambda pr: None) == "none", "never tracked: no hit, no points"
+    assert outcome("top", lambda pr: None if pr >= 0.5 else (duck if pr >= 0.3 else still)) == "none", \
+        "out of view at impact: no hit and no reward for leaving the frame"
 
 
 def test_classification():
@@ -725,7 +973,7 @@ def main():
     tests = [test_geometry, test_one_euro, test_stabilizer, test_mirror_and_drawing,
              test_front_features, test_side_features, test_side_hip_threshold, test_classification, test_session_statistics,
              test_session_csv, test_session_pause_resume, test_popup_notifier,
-             test_history_store, test_active_break_games]
+             test_history_store, test_active_break_games, test_coin_bomb_collisions]
     for test in tests:
         test()
         print(f"ok  {test.__name__}")

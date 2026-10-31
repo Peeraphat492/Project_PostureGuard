@@ -20,6 +20,7 @@ LEAN_HEAD_OFFSET = 0.30  # head offset from shoulder centre, in shoulder widths
 LEAN_SHIFT = 0.40        # head shift from the player's neutral position, in shoulder widths
 DUCK_DROP = 0.22         # head drop from neutral, in shoulder widths (converted to y units)
 DUCK_MIN_DROP = 0.05     # ...but never less than 5% of the frame height
+HAND_FROM_FOREARM = 0.38  # wrist -> hand centre as a share of elbow -> wrist (only when no hand point is visible)
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,8 @@ class BodyPose:
     wrists: Tuple[Point, ...] = ()
     elbows: Tuple[Point, ...] = ()
     aspect: float = 16 / 9  # frame width / height, to compare x and y distances
+    hands: Tuple[Point, ...] = ()   # hand centres for touching targets (wrists stay for the arm poses)
+    hand_sources: Tuple[str, ...] = ()   # per hand: "knuckles" (index/pinky landmarks) or "forearm" (estimated)
 
     @classmethod
     def from_landmarks(cls, lms: Optional[Dict], aspect: float = 16 / 9) -> Optional["BodyPose"]:
@@ -44,6 +47,20 @@ class BodyPose:
         def visible(*names):
             return tuple(lms[n].xy for n in names if n in lms and lms[n].visibility >= ARM_VISIBILITY)
 
+        def hand(side):
+            """Centre of the hand: between the index and pinky knuckles (the middle of an open hand, palm plus
+            fingers). Without hand points it is estimated along the forearm; a wrist alone is never a hand."""
+            knuckles = visible(f"{side}_index", f"{side}_pinky")
+            if knuckles:
+                return (sum(p[0] for p in knuckles) / len(knuckles),
+                        sum(p[1] for p in knuckles) / len(knuckles)), "knuckles"
+            arm = visible(f"{side}_elbow", f"{side}_wrist")
+            if len(arm) == 2:
+                (ex, ey), (wx, wy) = arm
+                return (wx + (wx - ex) * HAND_FROM_FOREARM, wy + (wy - ey) * HAND_FROM_FOREARM), "forearm"
+            return None
+
+        found = [h for h in (hand("left"), hand("right")) if h is not None]
         return cls(
             nose=lms["nose"].xy,
             left_shoulder=left,
@@ -51,6 +68,8 @@ class BodyPose:
             wrists=visible("left_wrist", "right_wrist"),
             elbows=visible("left_elbow", "right_elbow"),
             aspect=aspect,
+            hands=tuple(point for point, _ in found),
+            hand_sources=tuple(source for _, source in found),
         )
 
     # ------------------------------------------------------------------ geometry

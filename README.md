@@ -107,9 +107,6 @@ python main.py
   - ต้องเชื่อมต่อแอปบนโทรศัพท์ก่อนกด Open Cameras
     มิฉะนั้นแอปจะแสดง "Both cameras live" แต่กล้องข้างจะไม่พบบุคคล
   - ถ้าภาพหมุนหรือตะแคง แอปจะทำงานแบบ Partial Monitoring จนกว่าจะตั้งภาพให้ตรง
-- **ข้อจำกัดอื่น:**
-  - การทดสอบส่วนใหญ่เป็นการทดสอบอัตโนมัติด้วยข้อมูลจำลอง การทดสอบกับผู้ใช้จริงยังมีจำกัด
-  - การประมวลผลภาพจาก 2 กล้องพร้อมกันอาจช้าบนเครื่องสเปกต่ำ
 - **ตำแหน่งไฟล์ History:**
   - macOS: `~/Library/Application Support/Posture Guard/history.sqlite3`
   - Windows: `%APPDATA%\Posture Guard\history.sqlite3`
